@@ -59,10 +59,14 @@ type Conn struct {
 	// losing bytes.
 	mtu uint16
 
+	protocolVersion byte
+
 	// splits is a map of slices indexed by split IDs. The length of each of the
 	// slices is equal to the split count, and packets are positioned in that
 	// slice indexed by the split index.
-	splits map[uint16][][]byte
+	splits     map[uint16][][]byte
+	splitsTime map[uint16]time.Time
+	splitsMu   sync.Mutex
 
 	// win is an ordered queue used to track which datagrams were received and
 	// which datagrams were missing, so that we can send NACKs to request
@@ -91,24 +95,26 @@ type Conn struct {
 
 // newConn constructs a new connection specifically dedicated to the address
 // passed.
-func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandler) *Conn {
+func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandler, protocolVersion byte) *Conn {
 	mtu = min(max(mtu, minMTUSize), maxMTUSize)
 	c := &Conn{
-		raddr:          raddr,
-		conn:           conn,
-		mtu:            mtu,
-		handler:        h,
-		pk:             new(packet),
-		closed:         make(chan struct{}),
-		connected:      make(chan struct{}),
-		packets:        internal.Chan[[]byte](4),
-		splits:         make(map[uint16][][]byte),
-		win:            newDatagramWindow(),
-		packetQueue:    newPacketQueue(),
-		retransmission: newRecoveryQueue(),
-		buf:            bytes.NewBuffer(make([]byte, 0, mtu-28)), // - headers.
-		ackBuf:         bytes.NewBuffer(make([]byte, 0, 128)),
-		nackBuf:        bytes.NewBuffer(make([]byte, 0, 64)),
+		raddr:           raddr,
+		conn:            conn,
+		mtu:             mtu,
+		protocolVersion: protocolVersion,
+		handler:         h,
+		pk:              new(packet),
+		closed:          make(chan struct{}),
+		connected:       make(chan struct{}),
+		packets:         internal.Chan[[]byte](4),
+		splits:          make(map[uint16][][]byte),
+		splitsTime:      make(map[uint16]time.Time),
+		win:             newDatagramWindow(),
+		packetQueue:     newPacketQueue(),
+		retransmission:  newRecoveryQueue(),
+		buf:             bytes.NewBuffer(make([]byte, 0, mtu-28)), // - headers.
+		ackBuf:          bytes.NewBuffer(make([]byte, 0, 128)),
+		nackBuf:         bytes.NewBuffer(make([]byte, 0, 64)),
 	}
 	t := time.Now()
 	c.lastActivity.Store(&t)
@@ -167,6 +173,7 @@ func (conn *Conn) startTicking() {
 				}
 				conn.mu.Unlock()
 			}
+			conn.invalidateSplits()
 		case <-conn.closed:
 			return
 		}
@@ -185,6 +192,18 @@ func (conn *Conn) flushACKs() {
 			return
 		}
 		conn.ackSlice = conn.ackSlice[:0]
+	}
+}
+
+func (conn *Conn) invalidateSplits() {
+	conn.splitsMu.Lock()
+	defer conn.splitsMu.Unlock()
+	now := time.Now()
+	for splitID, t := range conn.splitsTime {
+		if now.After(t) {
+			delete(conn.splits, splitID)
+			delete(conn.splitsTime, splitID)
+		}
 	}
 }
 
@@ -349,6 +368,10 @@ func (conn *Conn) Latency() time.Duration {
 	return time.Duration(conn.rtt.Load() / 2)
 }
 
+func (conn *Conn) ProtocolVersion() byte {
+	return conn.protocolVersion
+}
+
 // send encodes an encoding.BinaryMarshaler and writes it to the Conn.
 func (conn *Conn) send(pk encoding.BinaryMarshaler) error {
 	b, _ := pk.MarshalBinary()
@@ -498,6 +521,10 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	if p.splitCount > maxSplitCount && conn.handler.limitsEnabled() {
 		return fmt.Errorf("split packet: split count %v exceeds the maximum %v", p.splitCount, maxSplitCount)
 	}
+
+	conn.splitsMu.Lock()
+	defer conn.splitsMu.Unlock()
+
 	if len(conn.splits) > maxConcurrentSplits && conn.handler.limitsEnabled() {
 		return fmt.Errorf("split packet: maximum concurrent splits %v reached", maxConcurrentSplits)
 	}
@@ -505,6 +532,7 @@ func (conn *Conn) receiveSplitPacket(p *packet) error {
 	if !ok {
 		m = make([][]byte, p.splitCount)
 		conn.splits[p.splitID] = m
+		conn.splitsTime[p.splitID] = time.Now().Add(time.Second * 10)
 	}
 	if p.splitIndex > uint32(len(m)-1) {
 		// The split index was either negative or was bigger than the slice

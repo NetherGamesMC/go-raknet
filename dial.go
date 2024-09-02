@@ -96,6 +96,8 @@ type Dialer struct {
 	// UpstreamDialer is a dialer that will override the default dialer for
 	// opening outgoing connections. The default is a net.Dial("udp", ...).
 	UpstreamDialer UpstreamDialer
+
+	ProtocolVersion byte
 }
 
 // Ping sends a ping to an address and returns the response obtained. If
@@ -214,13 +216,17 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 		dialer.ErrorLog = slog.New(internal.DiscardHandler{})
 	}
 
+	if dialer.ProtocolVersion == 0 {
+		dialer.ProtocolVersion = protocolVersion
+	}
+
 	conn, err := dialer.dial(ctx, address)
 	if err != nil {
 		return nil, dialer.error("dial", err)
 	}
 	dialer.ErrorLog = dialer.ErrorLog.With("src", "dialer", "raddr", conn.RemoteAddr().String())
 
-	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2)}
+	cs := &connState{conn: conn, raddr: conn.RemoteAddr(), id: atomic.AddInt64(&dialerID, 1), ticker: time.NewTicker(time.Second / 2), protocolVersion: dialer.ProtocolVersion}
 	defer cs.ticker.Stop()
 	if err = cs.discoverMTU(ctx); err != nil {
 		return nil, dialer.error("dial", err)
@@ -234,7 +240,7 @@ func (dialer Dialer) DialContext(ctx context.Context, address string) (*Conn, er
 // dial finishes the RakNet connection sequence and returns a Conn if
 // successful.
 func (dialer Dialer) connect(ctx context.Context, state *connState) (*Conn, error) {
-	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{l: dialer.ErrorLog})
+	conn := newConn(internal.ConnToPacketConn(state.conn), state.raddr, state.mtu, dialerConnectionHandler{l: dialer.ErrorLog}, dialer.ProtocolVersion)
 	if err := conn.send((&message.ConnectionRequest{ClientGUID: state.id, RequestTime: timestamp()})); err != nil {
 		return nil, dialer.error("dial", fmt.Errorf("send connection request: %w", err))
 	}
@@ -283,7 +289,8 @@ type connState struct {
 
 	// mtu is the final MTU size found by sending an open connection request
 	// 1 packet. It is the MTU size sent by the server.
-	mtu uint16
+	mtu             uint16
+	protocolVersion byte
 
 	serverSecurity bool
 	cookie         uint32
@@ -333,7 +340,7 @@ func (state *connState) discoverMTU(ctx context.Context) error {
 			if err := response.UnmarshalBinary(b[1:n]); err != nil {
 				return fmt.Errorf("read incompatible protocol version: %w", err)
 			}
-			return fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", protocolVersion, response.ServerProtocol)
+			return fmt.Errorf("mismatched protocol: client protocol = %v, server protocol = %v", state.protocolVersion, response.ServerProtocol)
 		}
 	}
 }
@@ -401,7 +408,7 @@ func (state *connState) request2(ctx context.Context, mtu uint16) {
 // openConnectionRequest1 sends an open connection request 1 packet to the
 // server. If not successful, an error is returned.
 func (state *connState) openConnectionRequest1(mtu uint16) {
-	data, _ := (&message.OpenConnectionRequest1{ClientProtocol: protocolVersion, MTU: mtu}).MarshalBinary()
+	data, _ := (&message.OpenConnectionRequest1{ClientProtocol: state.protocolVersion, MTU: mtu}).MarshalBinary()
 	_, _ = state.conn.Write(data)
 }
 

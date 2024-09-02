@@ -40,6 +40,8 @@ type ListenConfig struct {
 	// BlockDuration defaults to 10s. If set to a negative value, IP addresses
 	// are never blocked on errors.
 	BlockDuration time.Duration
+
+	ProtocolVersions []byte
 }
 
 // Listener implements a RakNet connection listener. It follows the same
@@ -69,6 +71,8 @@ type Listener struct {
 	// pongData is a byte slice of data that is sent in an unconnected pong
 	// packet each time the client sends and unconnected ping to the server.
 	pongData atomic.Pointer[[]byte]
+
+	protocolVersions []byte
 }
 
 // listenerID holds the next ID to use for a Listener.
@@ -100,13 +104,19 @@ func (conf ListenConfig) Listen(address string) (*Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: "raknet", Source: nil, Addr: nil, Err: err}
 	}
 	listener := &Listener{
-		conf:     conf,
-		conn:     conn,
-		incoming: make(chan *Conn),
-		closed:   make(chan struct{}),
-		id:       atomic.AddInt64(&listenerID, 1),
-		sec:      newSecurity(conf),
+		conf:             conf,
+		conn:             conn,
+		incoming:         make(chan *Conn),
+		protocolVersions: []byte{protocolVersion},
+		closed:           make(chan struct{}),
+		id:               atomic.AddInt64(&listenerID, 1),
+		sec:              newSecurity(conf),
 	}
+
+	if len(conf.ProtocolVersions) > 0 {
+		listener.protocolVersions = append(listener.protocolVersions, conf.ProtocolVersions...)
+	}
+
 	listener.handler = &listenerConnectionHandler{l: listener, cookieSalt: rand.Uint32()}
 	listener.pongData.Store(new([]byte))
 
@@ -184,7 +194,7 @@ func (listener *Listener) listen() {
 				close(listener.incoming)
 				return
 			}
-			listener.conf.ErrorLog.Error("read from: "+err.Error())
+			listener.conf.ErrorLog.Error("read from: " + err.Error())
 			continue
 		} else if n == 0 || listener.sec.blocked(addr) {
 			continue
