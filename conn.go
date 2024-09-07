@@ -173,7 +173,10 @@ func (conn *Conn) startTicking() {
 				}
 				conn.mu.Unlock()
 			}
+			conn.handler.log().Info(fmt.Sprintf("Got %v splits before invalidation", len(conn.splits)))
 			conn.invalidateSplits()
+			conn.handler.log().Info(fmt.Sprintf("Got %v splits after invalidation", len(conn.splits)))
+
 		case <-conn.closed:
 			return
 		}
