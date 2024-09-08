@@ -8,6 +8,7 @@ import (
 	"github.com/sandertv/go-raknet/internal"
 	"github.com/sandertv/go-raknet/internal/message"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"slices"
@@ -173,9 +174,10 @@ func (conn *Conn) startTicking() {
 				}
 				conn.mu.Unlock()
 			}
-			conn.handler.log().Info(fmt.Sprintf("Got %v splits before invalidation", len(conn.splits)))
+
+			log.Default().Printf("Got %v splits before invalidation", len(conn.splits))
 			conn.invalidateSplits()
-			conn.handler.log().Info(fmt.Sprintf("Got %v splits after invalidation", len(conn.splits)))
+			log.Default().Printf("Got %v splits after invalidation", len(conn.splits))
 
 		case <-conn.closed:
 			return
