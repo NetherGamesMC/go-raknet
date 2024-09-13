@@ -127,7 +127,7 @@ func (h listenerConnectionHandler) handleOpenConnectionRequest2(b []byte, addr n
 	}
 
 	go func() {
-		conn := newConn(h.l.conn, addr, mtuSize, h, protocolVersion)
+		conn := newConn(h.l.conn, addr, mtuSize, h, protocolVersion, ConnectionTypeUpstream)
 		h.l.connections.Store(resolve(addr), conn)
 
 		t := time.NewTimer(time.Second * 10)

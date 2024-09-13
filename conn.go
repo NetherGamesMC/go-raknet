@@ -17,6 +17,22 @@ import (
 	"time"
 )
 
+type ConnectionType int
+
+var (
+	ConnectionTypeUpstream          ConnectionType = 1
+	ConnectionTypeInitialDownstream ConnectionType = 2
+	ConnectionTypeDownstream        ConnectionType = 3
+	ConnectionTypeNoFuckingClue     ConnectionType = 4
+)
+
+var (
+	RunningTicksUpstream          atomic.Int32
+	RunningTicksInitialDownstream atomic.Int32
+	RunningTicksDownstream        atomic.Int32
+	RunningTicksNoFuckingClue     atomic.Int32
+)
+
 const (
 	// protocolVersion is the current RakNet protocol version. This is Minecraft
 	// specific.
@@ -51,6 +67,8 @@ type Conn struct {
 	ackBuf, nackBuf *bytes.Buffer
 
 	pk *packet
+
+	connectionType ConnectionType
 
 	seq, orderIndex, messageIndex uint24
 	splitID                       uint32
@@ -96,7 +114,7 @@ type Conn struct {
 
 // newConn constructs a new connection specifically dedicated to the address
 // passed.
-func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandler, protocolVersion byte) *Conn {
+func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandler, protocolVersion byte, connectionType ConnectionType) *Conn {
 	mtu = min(max(mtu, minMTUSize), maxMTUSize)
 	c := &Conn{
 		raddr:           raddr,
@@ -106,6 +124,7 @@ func newConn(conn net.PacketConn, raddr net.Addr, mtu uint16, h connectionHandle
 		handler:         h,
 		pk:              new(packet),
 		closed:          make(chan struct{}),
+		connectionType:  connectionType,
 		connected:       make(chan struct{}),
 		packets:         internal.Chan[[]byte](4),
 		splits:          make(map[uint16][][]byte),
@@ -133,6 +152,21 @@ func (conn *Conn) effectiveMTU() uint16 {
 // the other end where necessary and checking if the connection should be timed
 // out.
 func (conn *Conn) startTicking() {
+	switch conn.connectionType {
+	case ConnectionTypeUpstream:
+		RunningTicksUpstream.Add(1)
+		defer func() { RunningTicksUpstream.Add(-1) }()
+	case ConnectionTypeDownstream:
+		RunningTicksDownstream.Add(1)
+		defer func() { RunningTicksDownstream.Add(-1) }()
+	case ConnectionTypeInitialDownstream:
+		RunningTicksInitialDownstream.Add(1)
+		defer func() { RunningTicksInitialDownstream.Add(-1) }()
+	case ConnectionTypeNoFuckingClue:
+		RunningTicksNoFuckingClue.Add(1)
+		defer func() { RunningTicksNoFuckingClue.Add(-1) }()
+	}
+
 	var (
 		interval = time.Second / 10
 		ticker   = time.NewTicker(interval)
